@@ -7,7 +7,7 @@ authentication via pyodbc + ODBC Driver 18 for SQL Server.
 
 import struct
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pyodbc
 from azure.identity import ClientSecretCredential
@@ -137,10 +137,8 @@ def _delete_existing(cursor, report_date, store_id):
 # Insert helpers
 # ---------------------------------------------------------------------------
 
-def _insert_summary(cursor, data, store_id):
+def _insert_summary(cursor, data, store_id, processed_at):
     """INSERT one row into Fact_EOD_Summary and return the generated summary_id."""
-
-    processed_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
     cursor.execute(
         f"""
@@ -173,10 +171,8 @@ def _insert_summary(cursor, data, store_id):
     return summary_id
 
 
-def _insert_transactions(cursor, transactions, summary_id, store_id, report_date):
+def _insert_transactions(cursor, transactions, summary_id, store_id, report_date, processed_at):
     """INSERT each transaction dict into Fact_EOD_Transaction."""
-
-    processed_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     count = 0
 
     for tx in transactions:
@@ -252,12 +248,13 @@ def write_eod_data(parsed_data):
         # 2. Atomic replace — delete any pre-existing rows for this date+store
         _delete_existing(cursor, report_date, store_id)
 
-        # 3. Insert summary
-        summary_id = _insert_summary(cursor, parsed_data, store_id)
+        # 3. Insert summary + transactions with a single timestamp
+        processed_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        summary_id = _insert_summary(cursor, parsed_data, store_id, processed_at)
 
         # 4. Insert transactions
         transactions = parsed_data.get("transactions") or []
-        _insert_transactions(cursor, transactions, summary_id, store_id, report_date)
+        _insert_transactions(cursor, transactions, summary_id, store_id, report_date, processed_at)
 
         # 5. Commit and clean up
         conn.commit()

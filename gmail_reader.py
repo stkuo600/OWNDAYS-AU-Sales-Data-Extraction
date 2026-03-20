@@ -243,14 +243,21 @@ def fetch_unread_emails(service) -> list:
     query = "is:unread has:attachment"
     logger.info("Searching Gmail with query: '%s'", query)
 
-    results = (
-        service.users()
-        .messages()
-        .list(userId=user_id, q=query)
-        .execute()
-    )
+    all_messages = []
+    page_token = None
+    while True:
+        results = (
+            service.users()
+            .messages()
+            .list(userId=user_id, q=query, pageToken=page_token)
+            .execute()
+        )
+        all_messages.extend(results.get("messages", []))
+        page_token = results.get("nextPageToken")
+        if not page_token:
+            break
 
-    messages = results.get("messages", [])
+    messages = all_messages
     logger.info("Found %d message(s) matching query.", len(messages))
 
     emails = []

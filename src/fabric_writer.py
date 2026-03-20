@@ -140,6 +140,8 @@ def _delete_existing(cursor, report_date, store_id):
 def _insert_summary(cursor, data, store_id, processed_at):
     """INSERT one row into Fact_EOD_Summary and return the generated summary_id."""
 
+    report_date = data.get("report_date")
+
     cursor.execute(
         f"""
         INSERT INTO {config.FABRIC_SCHEMA}.Fact_EOD_Summary
@@ -149,7 +151,7 @@ def _insert_summary(cursor, data, store_id, processed_at):
              _processed_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        data.get("report_date"),
+        report_date,
         store_id,
         data.get("banking_no"),
         data.get("total_inc_gst"),
@@ -165,7 +167,12 @@ def _insert_summary(cursor, data, store_id, processed_at):
         processed_at,
     )
 
-    cursor.execute("SELECT @@IDENTITY")
+    # Fabric doesn't support @@IDENTITY or OUTPUT — retrieve by unique key
+    cursor.execute(
+        f"SELECT summary_id FROM {config.FABRIC_SCHEMA}.Fact_EOD_Summary "
+        f"WHERE report_date = ? AND store_id = ? AND _processed_at = ?",
+        report_date, store_id, processed_at,
+    )
     summary_id = cursor.fetchone()[0]
     logger.info("Inserted Fact_EOD_Summary summary_id=%s", summary_id)
     return summary_id

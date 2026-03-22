@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -28,10 +29,11 @@ LOG_FILE = str(_PROJECT_ROOT / _env.get("LOG_FILE", "eod_processor.log"))
 
 # SMTP Notification
 SMTP_SERVER = _env.get("SMTP_SERVER")
-SMTP_PORT = int(_env.get("SMTP_PORT", "25"))
+SMTP_PORT = int(_env.get("SMTP_PORT") or "25")
 SMTP_FROM_EMAIL = _env.get("SMTP_FROM_EMAIL")
 SMTP_FROM_NAME = _env.get("SMTP_FROM_NAME", "EOD Processor")
-SMTP_TO_EMAIL = _env.get("SMTP_TO_EMAIL")
+SMTP_TO_SUCCESS = _env.get("SMTP_TO_SUCCESS", "")
+SMTP_TO_ERROR = _env.get("SMTP_TO_ERROR", "")
 
 # Validate required settings
 _required = {
@@ -46,3 +48,6 @@ _required = {
 _missing = [k for k, v in _required.items() if not v]
 if _missing:
     raise RuntimeError(f"Missing required settings in .env: {', '.join(_missing)}")
+
+if not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_]*', FABRIC_SCHEMA):
+    raise RuntimeError(f"FABRIC_SCHEMA '{FABRIC_SCHEMA}' is not a valid SQL identifier")

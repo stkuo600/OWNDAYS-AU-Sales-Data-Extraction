@@ -120,6 +120,7 @@ def _extract_text_body(payload: dict) -> str:
     parts = payload.get("parts", [])
     plain_text = ""
     fallback_text = ""
+    html_fallback = ""
 
     for part in parts:
         part_mime = part.get("mimeType", "")
@@ -132,11 +133,10 @@ def _extract_text_body(payload: dict) -> str:
             result = _extract_text_body(part)
             if result and not plain_text:
                 fallback_text = result
-        elif part_mime == "text/html" and not fallback_text:
-            # Keep html as a last resort but don't return it — just note it.
-            pass
+        elif part_mime == "text/html" and not html_fallback:
+            html_fallback = _decode_body(part)
 
-    return plain_text or fallback_text
+    return plain_text or fallback_text or html_fallback
 
 
 def _extract_pdf_attachments(service, user_id: str, message_id: str, payload: dict) -> list:
@@ -178,9 +178,17 @@ def _extract_pdf_attachments(service, user_id: str, message_id: str, payload: di
         filename = part.get("filename") or "attachment.pdf"
         attachment_id = part.get("body", {}).get("attachmentId")
         if not attachment_id:
-            logger.warning(
-                "PDF part in message %s has no attachmentId — skipping.", message_id
-            )
+            # Handle inline PDF data (no separate attachment reference)
+            inline_data = part.get("body", {}).get("data", "")
+            if inline_data:
+                standard_b64 = base64.b64encode(
+                    base64.urlsafe_b64decode(inline_data + "==")
+                ).decode("utf-8")
+                attachments.append({"filename": filename, "data_base64": standard_b64})
+            else:
+                logger.warning(
+                    "PDF part in message %s has no attachmentId and no inline data — skipping.", message_id
+                )
             continue
 
         logger.debug(

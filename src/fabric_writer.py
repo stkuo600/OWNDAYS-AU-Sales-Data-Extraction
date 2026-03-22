@@ -269,7 +269,7 @@ def write_eod_data(parsed_data):
         _delete_existing(cursor, report_date, store_id)
 
         # 3. Insert summary + transactions with a single timestamp
-        processed_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        processed_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
         summary_id = _insert_summary(cursor, parsed_data, store_id, processed_at)
 
         # 4. Insert transactions

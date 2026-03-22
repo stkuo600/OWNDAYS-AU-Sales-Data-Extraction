@@ -114,7 +114,7 @@ def parse_eod_email(email_data):
 
         response = client.messages.create(
             model=config.CLAUDE_MODEL,
-            max_tokens=4096,
+            max_tokens=8192,
             messages=[{"role": "user", "content": content}],
         )
 

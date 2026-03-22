@@ -145,15 +145,15 @@ def _insert_summary(cursor, data, store_id, processed_at):
     cursor.execute(
         f"""
         INSERT INTO {config.FABRIC_SCHEMA}.Fact_EOD_Summary
-            (report_date, store_id, banking_no, total_inc_gst, total_tax,
+            (report_date, store_id, total_inc_gst, total_tax,
              total_exc_gst, transaction_count, target_exc_gst, consultation,
              no_customers, daily_comment, customer_feedback, sender_email,
+             total_consult, total_frame, total_lens, total_cl, total_sundry, total_misc,
              _processed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         report_date,
         store_id,
-        data.get("banking_no"),
         data.get("total_inc_gst"),
         data.get("total_tax"),
         data.get("total_exc_gst"),
@@ -164,6 +164,12 @@ def _insert_summary(cursor, data, store_id, processed_at):
         data.get("daily_comment"),
         data.get("customer_feedback"),
         data.get("sender_email"),
+        data.get("total_consult"),
+        data.get("total_frame"),
+        data.get("total_lens"),
+        data.get("total_cl"),
+        data.get("total_sundry"),
+        data.get("total_misc"),
         processed_at,
     )
 
@@ -191,8 +197,9 @@ def _insert_transactions(cursor, transactions, summary_id, store_id, report_date
             INSERT INTO {config.FABRIC_SCHEMA}.Fact_EOD_Transaction
                 (summary_id, report_date, store_id, receipt_no, method_id,
                  method_code, customer_name, customer_id, amount_inc_tax,
-                 tax, amount_exc_tax, _processed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 tax, amount_exc_tax, consult, frame, lens, cl, sundry, misc,
+                 _processed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             summary_id,
             report_date,
@@ -205,6 +212,12 @@ def _insert_transactions(cursor, transactions, summary_id, store_id, report_date
             tx.get("amount_inc_tax"),
             tx.get("tax"),
             tx.get("amount_exc_tax"),
+            tx.get("consult"),
+            tx.get("frame"),
+            tx.get("lens"),
+            tx.get("cl"),
+            tx.get("sundry"),
+            tx.get("misc"),
             processed_at,
         )
         count += 1

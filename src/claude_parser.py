@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 _EXTRACTION_PROMPT_TEMPLATE = """\
 You are extracting data from an End of Day (EOD) report email for an optical retail store.
 
-The email contains PDF attachments. Find the **Banking Transaction Report** PDF — it has columns: Date, Receipt, Paid By, Patient/Payer, Amount Inc Tax, Tax, Amount Exc Tax. Ignore other PDFs (e.g. "Payment Detail by Payment Type").
+The email contains PDF attachments. Find the **Payment Detail by Payment Type** PDF — it has columns: Date, Ref-No, Name, Tax Paid, Payment (Inc Tax)$, Consult $, Frame $, Lens $, CL $, Sundry $, Misc $. Rows are grouped under "Payment Type: XXX" section headers. Ignore other PDFs (e.g. "Banking Transaction Report", "BulkBillingSummaryReport", "DailyTallyReport", "ScannedDocument").
 
 Extract the following and return as a single JSON object (no markdown, no preamble, ONLY valid JSON):
 
@@ -31,20 +31,31 @@ From the email body text below:
 - "daily_comment": any daily comment text (string, empty string if none)
 - "customer_feedback": any customer feedback text (string, empty string if none)
 
-From the Banking Transaction Report PDF:
-- "banking_no": the banking number from the PDF header
-- "total_inc_gst": total amount including tax from the Total row (numeric, no $ or commas)
-- "total_tax": total tax from the Total row (numeric, no $ or commas)
-- "total_exc_gst": total amount excluding tax from the Total row (numeric, no $ or commas)
-- "transaction_count": number of individual transaction rows (exclude sub-total and total rows)
-- "transactions": array of objects, one per transaction row (exclude sub-total/total rows):
-  - "receipt_no": receipt number (string, empty string if none e.g. for DDEP rows)
-  - "payment_method": the Paid By code exactly as shown (e.g. "MASTER", "HC", "DDEP", "VISA", "EFTPOS", "CASH")
-  - "customer_name": patient/payer name without the ID portion (string)
-  - "customer_id": the number after # without the # symbol (string, empty string if none)
-  - "amount_inc_tax": amount including tax (numeric, no $ or commas)
-  - "tax": tax amount (numeric, no $ or commas)
-  - "amount_exc_tax": amount excluding tax (numeric, no $ or commas)
+From the Payment Detail by Payment Type PDF:
+- "total_inc_gst": grand total Payment (Inc Tax) from the last row of the last page (numeric, no $ or commas)
+- "total_tax": grand total Tax Paid from the last row of the last page (numeric, no $ or commas)
+- "total_exc_gst": derived as total_inc_gst - total_tax (numeric)
+- "total_consult": grand total Consult $ (numeric)
+- "total_frame": grand total Frame $ (numeric)
+- "total_lens": grand total Lens $ (numeric)
+- "total_cl": grand total CL $ (numeric)
+- "total_sundry": grand total Sundry $ (numeric)
+- "total_misc": grand total Misc $ (numeric)
+- "transaction_count": number of individual transaction rows (exclude per-payment-type subtotal rows and the grand total row)
+- "transactions": array of objects, one per transaction row (exclude subtotal and grand total rows):
+  - "receipt_no": Ref-No column (string, empty string if none e.g. for DDEP/Medicare rows)
+  - "payment_method": the Payment Type section header the row belongs to, exactly as shown (e.g. "MASTER", "HC", "DDEP", "VISA", "EFTPOS", "CASH", "zMP")
+  - "customer_name": Name column — the name portion only, without the ID number (string)
+  - "customer_id": the number after the last dash in the Name column (string, empty string if none e.g. for Medicare)
+  - "amount_inc_tax": Payment (Inc Tax)$ column (numeric, no $ or commas)
+  - "tax": Tax Paid column (numeric, no $ or commas)
+  - "amount_exc_tax": derived as amount_inc_tax - tax (numeric)
+  - "consult": Consult $ column (numeric)
+  - "frame": Frame $ column (numeric)
+  - "lens": Lens $ column (numeric)
+  - "cl": CL $ column (numeric)
+  - "sundry": Sundry $ column (numeric)
+  - "misc": Misc $ column (numeric)
 
 Remove $ signs and commas from ALL numeric values. Return numbers as numbers, not strings.
 

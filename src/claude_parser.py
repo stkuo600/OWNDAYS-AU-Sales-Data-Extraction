@@ -1,15 +1,14 @@
 """
-claude_parser.py
+claude_parser.py — AI-powered EOD report extraction.
 
-Sends EOD report email data (body + PDF attachments) to Claude and returns
-the extracted structured data as a Python dict.
+Supports two providers (configured via AI_PROVIDER in .env):
+  - "anthropic": Claude API (Anthropic SDK)
+  - "azure": Azure OpenAI GPT-4o (OpenAI SDK)
 """
 
 import json
 import logging
 import re
-
-import anthropic
 
 import config
 
@@ -63,8 +62,61 @@ EMAIL BODY:
 {email_body}"""
 
 
+def _call_anthropic(content):
+    """Send extraction request via Anthropic Claude API."""
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    logger.info("Sending to Claude (model=%s)", config.CLAUDE_MODEL)
+
+    response = client.messages.create(
+        model=config.CLAUDE_MODEL,
+        max_tokens=16384,
+        messages=[{"role": "user", "content": content}],
+    )
+    return response.content[0].text
+
+
+def _call_azure_openai(content):
+    """Send extraction request via Azure OpenAI Responses API (v1)."""
+    from openai import OpenAI
+
+    # Azure Foundry v1 endpoint — use OpenAI client directly with base_url
+    # Endpoint format: https://<resource>.services.ai.azure.com/api/projects/<project>/openai/v1/responses
+    # Base URL for SDK: strip /responses to get the v1 base
+    base_url = config.AZURE_OPENAI_ENDPOINT
+    if base_url.endswith("/responses"):
+        base_url = base_url[: -len("/responses")]
+
+    client = OpenAI(
+        base_url=base_url,
+        api_key=config.AZURE_OPENAI_API_KEY,
+    )
+    logger.info("Sending to Azure OpenAI (deployment=%s)", config.AZURE_OPENAI_DEPLOYMENT)
+
+    # Convert Anthropic content format to OpenAI Responses API format
+    openai_content = []
+    for block in content:
+        if block["type"] == "text":
+            openai_content.append({"type": "input_text", "text": block["text"]})
+        elif block["type"] == "document":
+            data = block["source"]["data"]
+            openai_content.append({
+                "type": "input_file",
+                "filename": "attachment.pdf",
+                "file_data": f"data:application/pdf;base64,{data}",
+            })
+
+    response = client.responses.create(
+        model=config.AZURE_OPENAI_DEPLOYMENT,
+        input=[{"role": "user", "content": openai_content}],
+        max_output_tokens=16384,
+    )
+    return response.output_text
+
+
 def parse_eod_email(email_data):
-    """Parse an EOD report email using Claude.
+    """Parse an EOD report email using the configured AI provider.
 
     Args:
         email_data (dict): Must contain:
@@ -79,18 +131,14 @@ def parse_eod_email(email_data):
               message_id metadata, or None on any failure.
     """
     try:
-        client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-
-        # Build the content list
+        # Build the content list (Anthropic format — converted for Azure in _call_azure_openai)
         content = []
 
         for attachment in email_data.get("attachments", []):
-            # Label each PDF so Claude knows which file follows
             content.append({
                 "type": "text",
                 "text": f"PDF: {attachment['filename']}",
             })
-            # Send the raw PDF bytes as a base64-encoded document block
             content.append({
                 "type": "document",
                 "source": {
@@ -100,27 +148,24 @@ def parse_eod_email(email_data):
                 },
             })
 
-        # Append the extraction prompt with the email body substituted in
         extraction_prompt = _EXTRACTION_PROMPT_TEMPLATE.format(
             email_body=email_data.get("body", "")
         )
         content.append({"type": "text", "text": extraction_prompt})
 
         logger.info(
-            "Sending EOD email to Claude (model=%s, attachments=%d)",
-            config.CLAUDE_MODEL,
+            "Parsing EOD email (provider=%s, attachments=%d)",
+            config.AI_PROVIDER,
             len(email_data.get("attachments", [])),
         )
 
-        response = client.messages.create(
-            model=config.CLAUDE_MODEL,
-            max_tokens=16384,
-            messages=[{"role": "user", "content": content}],
-        )
+        # Call the configured provider
+        if config.AI_PROVIDER == "azure":
+            raw_text = _call_azure_openai(content)
+        else:
+            raw_text = _call_anthropic(content)
 
-        raw_text = response.content[0].text
-
-        # Strip markdown code fences if Claude wraps the JSON anyway
+        # Strip markdown code fences if the model wraps the JSON
         cleaned_text = re.sub(
             r"^```(?:json)?\s*\n?|\n?```\s*$", "", raw_text.strip()
         )
@@ -129,13 +174,13 @@ def parse_eod_email(email_data):
             parsed = json.loads(cleaned_text)
         except json.JSONDecodeError as exc:
             logger.error(
-                "Failed to parse Claude JSON response: %s\nRaw response: %s",
+                "Failed to parse JSON response: %s\nRaw response: %s",
                 exc,
                 raw_text,
             )
             return None
 
-        # Attach email metadata so downstream consumers have full context
+        # Attach email metadata
         parsed["sender_email"] = email_data.get("sender_email")
         parsed["sender_name"] = email_data.get("sender_name")
         parsed["message_id"] = email_data.get("message_id")
@@ -145,6 +190,6 @@ def parse_eod_email(email_data):
         )
         return parsed
 
-    except Exception as exc:  # Catches Anthropic API errors and any other unexpected errors
+    except Exception as exc:
         logger.error("Unexpected error in parse_eod_email: %s", exc, exc_info=True)
         return None

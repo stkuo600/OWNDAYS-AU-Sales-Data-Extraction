@@ -6,9 +6,17 @@ from dotenv import dotenv_values
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _env = dotenv_values(_PROJECT_ROOT / ".env")
 
+# AI Provider
+AI_PROVIDER = (_env.get("AI_PROVIDER") or "anthropic").lower()
+
 # Anthropic
 ANTHROPIC_API_KEY = _env.get("ANTHROPIC_API_KEY")
 CLAUDE_MODEL = _env.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+
+# Azure OpenAI
+AZURE_OPENAI_ENDPOINT = _env.get("AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_API_KEY = _env.get("AZURE_OPENAI_API_KEY")
+AZURE_OPENAI_DEPLOYMENT = _env.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
 
 # Azure AD Service Principal
 AZURE_TENANT_ID = _env.get("AZURE_TENANT_ID")
@@ -37,7 +45,6 @@ SMTP_TO_ERROR = _env.get("SMTP_TO_ERROR", "")
 
 # Validate required settings
 _required = {
-    "ANTHROPIC_API_KEY": ANTHROPIC_API_KEY,
     "AZURE_CLIENT_SECRET": AZURE_CLIENT_SECRET,
     "AZURE_TENANT_ID": AZURE_TENANT_ID,
     "AZURE_CLIENT_ID": AZURE_CLIENT_ID,
@@ -45,6 +52,13 @@ _required = {
     "FABRIC_DATABASE": FABRIC_DATABASE,
     "FABRIC_SCHEMA": FABRIC_SCHEMA,
 }
+if AI_PROVIDER == "anthropic":
+    _required["ANTHROPIC_API_KEY"] = ANTHROPIC_API_KEY
+elif AI_PROVIDER == "azure":
+    _required["AZURE_OPENAI_ENDPOINT"] = AZURE_OPENAI_ENDPOINT
+    _required["AZURE_OPENAI_API_KEY"] = AZURE_OPENAI_API_KEY
+else:
+    raise RuntimeError(f"AI_PROVIDER must be 'anthropic' or 'azure', got '{AI_PROVIDER}'")
 _missing = [k for k, v in _required.items() if not v]
 if _missing:
     raise RuntimeError(f"Missing required settings in .env: {', '.join(_missing)}")

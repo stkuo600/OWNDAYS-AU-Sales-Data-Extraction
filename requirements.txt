@@ -1,4 +1,5 @@
 anthropic
+openai
 python-dotenv
 google-auth
 google-auth-oauthlib

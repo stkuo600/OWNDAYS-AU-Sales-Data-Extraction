@@ -1,19 +1,61 @@
 """
 main.py — Entry point for the OWNDAYS EOD Report Processor.
 
-Orchestrates: Gmail fetch → Claude parse → Fabric write → mark as read.
+Orchestrates: Gmail fetch → Claude parse → JSON write → FTP upload → mark as read.
+
+Backfill mode (--from / --to YYYY-MM-DD):
+    Fetches emails in the given date range from configured store senders,
+    writes JSON locally only. Skips SFTP upload, Gmail mark-as-read,
+    dedup, and email notifications.
 """
 
+import argparse
 import logging
 import smtplib
 import sys
 import traceback
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 
 import config
 import gmail_reader
 import claude_parser
-import fabric_writer
+import json_writer
+import ftp_uploader
+
+logger = logging.getLogger(__name__)
+
+
+def deduplicate_emails(emails):
+    """Drop duplicate emails, keeping the first occurrence of each store/day.
+
+    An email is a duplicate only if BOTH its sender address and its send_date
+    match an already-seen email. Gmail returns newest-first, so the first
+    occurrence of a (sender, send_date) pair wins. Two different days' reports
+    from the same store are NOT duplicates and are both kept.
+
+    Args:
+        emails (list[dict]): Email dicts with ``sender_email`` and ``send_date``.
+
+    Returns:
+        tuple[list[dict], list[str]]: (unique_emails, duplicate_message_ids).
+    """
+    seen = set()
+    unique_emails = []
+    duplicate_ids = []
+    for email_data in emails:
+        sender = email_data.get("sender_email", "unknown")
+        key = (sender, email_data.get("send_date"))
+        if key in seen:
+            duplicate_ids.append(email_data["message_id"])
+            logger.info(
+                "Duplicate email from=%s date=%s subject=%s — keeping first occurrence",
+                sender, email_data.get("send_date"), email_data.get("subject"),
+            )
+        else:
+            seen.add(key)
+            unique_emails.append(email_data)
+    return unique_emails, duplicate_ids
 
 
 def setup_logging():
@@ -62,12 +104,31 @@ def send_notification(subject, body_html, recipients):
         logger.exception("Failed to send notification email")
 
 
+def _parse_args():
+    parser = argparse.ArgumentParser(description="OWNDAYS EOD Processor")
+    parser.add_argument("--from", dest="from_date",
+                        help="Backfill start date (YYYY-MM-DD, inclusive)")
+    parser.add_argument("--to", dest="to_date",
+                        help="Backfill end date (YYYY-MM-DD, inclusive)")
+    return parser.parse_args()
+
+
 def main():
     setup_logging()
     logger = logging.getLogger(__name__)
 
+    args = _parse_args()
+    backfill = bool(args.from_date or args.to_date)
+    if backfill and not (args.from_date and args.to_date):
+        logger.error("--from and --to must both be provided for backfill mode")
+        sys.exit(2)
+
     logger.info("=" * 60)
-    logger.info("EOD Processor — starting run")
+    if backfill:
+        logger.info("EOD Processor — BACKFILL run %s to %s (local JSON only)",
+                    args.from_date, args.to_date)
+    else:
+        logger.info("EOD Processor — starting run")
     logger.info("=" * 60)
 
     success_count = 0
@@ -78,8 +139,18 @@ def main():
 
     try:
         service = gmail_reader.get_gmail_service()
-        emails = gmail_reader.fetch_unread_emails(service)
-        logger.info("Found %d unread emails with PDF attachments", len(emails))
+        if backfill:
+            # Gmail 'before:' is exclusive — add one day so the end date is inclusive.
+            after = datetime.strptime(args.from_date, "%Y-%m-%d").strftime("%Y/%m/%d")
+            before = (datetime.strptime(args.to_date, "%Y-%m-%d")
+                      + timedelta(days=1)).strftime("%Y/%m/%d")
+            emails = gmail_reader.fetch_emails_in_date_range(
+                service, after, before, list(config.STORE_MAP.keys())
+            )
+            logger.info("Found %d emails in date range", len(emails))
+        else:
+            emails = gmail_reader.fetch_unread_emails(service)
+            logger.info("Found %d unread emails with PDF attachments", len(emails))
     except Exception:
         logger.exception("Failed to fetch emails from Gmail")
         send_notification(
@@ -88,6 +159,27 @@ def main():
             config.SMTP_TO_ERROR,
         )
         return
+
+    # Deduplicate: keep the latest email per store per day (sender, send_date).
+    # Gmail returns newest first, so the first occurrence wins.
+    emails, duplicate_ids = deduplicate_emails(emails)
+
+    if backfill:
+        # Backfill writes local JSON only — leave Gmail state untouched, so
+        # duplicates are simply skipped rather than marked as read.
+        if duplicate_ids:
+            logger.info("Skipping %d duplicate email(s)", len(duplicate_ids))
+        logger.info("Processing %d unique email(s) in backfill mode", len(emails))
+    else:
+        if duplicate_ids:
+            logger.info("Marking %d duplicate email(s) as read", len(duplicate_ids))
+            for dup_id in duplicate_ids:
+                try:
+                    gmail_reader.mark_as_read(service, dup_id)
+                except Exception:
+                    logger.exception("Failed to mark duplicate %s as read", dup_id)
+
+        logger.info("Processing %d unique email(s) after deduplication", len(emails))
 
     for email_data in emails:
         sender = email_data.get("sender_email", "unknown")
@@ -104,37 +196,55 @@ def main():
             failed_count += 1
             continue
 
-        store_name = parsed.get("store_name", "Unknown")
+        store_code = config.STORE_MAP.get(sender, "Unknown")
         report_date = parsed.get("report_date", "")
-        total_exc_gst = parsed.get("total_exc_gst", 0)
+        total_exc_tax = parsed.get("total_exc_tax", 0)
         txn_count = len(parsed.get("transactions", []))
 
         logger.info("Parsed: date=%s store=%s transactions=%d",
-                     report_date, store_name, txn_count)
+                     report_date, store_code, txn_count)
 
-        # Write to Fabric
-        result = fabric_writer.write_eod_data(parsed)
+        # Write JSON file
+        result, file_path = json_writer.write_json(parsed)
 
-        if result == "success":
+        if result == "skipped":
+            logger.warning("Skipped email from=%s — store not found in STORE_MAP, NOT marked as read", sender)
+            errors.append(f"Skipped (store not found): {sender} — {subject}")
+            store_results.append((store_code, report_date, total_exc_tax, txn_count, "SKIPPED"))
+            skipped_count += 1
+            continue
+
+        if result == "error":
+            logger.error("Failed to write JSON for email from=%s — NOT marked as read", sender)
+            errors.append(f"JSON write failed: {sender} — {subject}")
+            store_results.append((store_code, report_date, total_exc_tax, txn_count, "FAILED"))
+            failed_count += 1
+            continue
+
+        # Upload to FTP (skipped in backfill mode)
+        if config.FTP_HOST and not backfill:
+            ftp_ok = ftp_uploader.upload_file(file_path)
+            if not ftp_ok:
+                logger.error("FTP upload failed for %s — email NOT marked as read", file_path)
+                errors.append(f"FTP upload failed: {sender} — {subject}")
+                store_results.append((store_code, report_date, total_exc_tax, txn_count, "FTP FAILED"))
+                failed_count += 1
+                continue
+
+        # Mark as read (skipped in backfill mode — leave Gmail state untouched)
+        if not backfill:
             try:
                 gmail_reader.mark_as_read(service, message_id)
                 logger.info("Success — email marked as read")
-                store_results.append((store_name, report_date, total_exc_gst, txn_count, "OK"))
+                store_results.append((store_code, report_date, total_exc_tax, txn_count, "OK"))
             except Exception:
                 logger.exception("Data written but failed to mark email as read: message_id=%s", message_id)
                 errors.append(f"Mark-as-read failed (data written): {sender} — {subject}")
-                store_results.append((store_name, report_date, total_exc_gst, txn_count, "OK*"))
-            success_count += 1
-        elif result == "skipped":
-            logger.warning("Skipped email from=%s — store not found, NOT marked as read", sender)
-            errors.append(f"Skipped (store not found): {sender} — {subject}")
-            store_results.append((store_name, report_date, total_exc_gst, txn_count, "SKIPPED"))
-            skipped_count += 1
+                store_results.append((store_code, report_date, total_exc_tax, txn_count, "OK*"))
         else:
-            logger.error("Failed to write data for email from=%s — NOT marked as read", sender)
-            errors.append(f"Write failed: {sender} — {subject}")
-            store_results.append((store_name, report_date, total_exc_gst, txn_count, "FAILED"))
-            failed_count += 1
+            logger.info("Success — JSON written (Gmail untouched)")
+            store_results.append((store_code, report_date, total_exc_tax, txn_count, "OK"))
+        success_count += 1
 
     logger.info("=" * 60)
     logger.info("EOD Processor — run complete: success=%d failed=%d skipped=%d",
@@ -189,7 +299,11 @@ def main():
             f"</div></div>"
         )
 
-    # Send notification
+    # Send notification (skipped in backfill mode)
+    if backfill:
+        logger.info("Backfill mode — skipping email notification")
+        return
+
     if failed_count > 0 or skipped_count > 0:
         error_items = "".join(f"<li>{e}</li>" for e in errors)
         extra = f"<div style='margin-top:16px;padding:12px;background:#fff3e0;border-left:4px solid #e65100;border-radius:4px'><b>Issues:</b><ul style='margin:8px 0 0'>{error_items}</ul></div>"

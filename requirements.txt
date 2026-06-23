@@ -1,9 +1,6 @@
 anthropic
 openai
 python-dotenv
-google-auth
-google-auth-oauthlib
-google-auth-httplib2
-google-api-python-client
-pyodbc
-azure-identity
+msal>=1.37.0
+requests>=2.32.0
+paramiko

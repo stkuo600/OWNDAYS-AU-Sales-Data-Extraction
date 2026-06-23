@@ -2,17 +2,17 @@
 
 ## Overview
 
-Automated EOD (End of Day) Report Processor for OWNDAYS optical retail stores in Australia. Reads daily sales report emails from Gmail, extracts structured data from PDF attachments using Claude AI, and writes results to Microsoft Fabric Warehouse.
+Automated EOD (End of Day) Report Processor for OWNDAYS optical retail stores in Australia. Reads daily sales report emails from Gmail, extracts structured data from Banking Transaction Report PDFs using Claude AI, outputs JSON files locally and uploads them to an SFTP server.
 
 ## Architecture
 
-Linear batch pipeline — 4 procedural modules orchestrated by `main.py`:
+Linear batch pipeline — 5 procedural modules orchestrated by `main.py`:
 
 ```
-Gmail API (OAuth2) → gmail_reader → claude_parser → fabric_writer → Fabric Warehouse
+Gmail API (OAuth2) → gmail_reader → claude_parser → json_writer → ftp_uploader → SFTP Server
 ```
 
-No classes, no retry logic. Unread emails serve as the natural retry queue — emails are only marked as read after successful write to Fabric.
+No classes, no retry logic. Unread emails serve as the natural retry queue — emails are only marked as read after successful JSON write and SFTP upload.
 
 ## Project Structure
 
@@ -21,8 +21,9 @@ No classes, no retry logic. Unread emails serve as the natural retry queue — e
 │   ├── config.py           # All settings from .env via dotenv_values()
 │   ├── main.py             # Entry point and orchestrator
 │   ├── gmail_reader.py     # Gmail API: fetch unread emails with PDF attachments
-│   ├── claude_parser.py    # Claude API: extract structured data from email + PDFs
-│   └── fabric_writer.py    # Fabric Warehouse: write summary + transactions
+│   ├── claude_parser.py    # Claude API: extract structured data from BankingTransactionReport PDFs
+│   ├── json_writer.py      # Transform parsed data → JSON files saved locally
+│   └── ftp_uploader.py     # Upload JSON files to SFTP server (despite the name)
 ├── docs/                   # PRD, design spec, implementation plan
 ├── .env                    # Secrets and config (gitignored)
 ├── .env.example            # Template for .env
@@ -45,8 +46,8 @@ First run opens a browser for Gmail OAuth2 consent. Subsequent runs are non-inte
 - **Python 3.12+**
 - **Gmail API** — OAuth2 with offline refresh token (`gmail.modify` scope)
 - **Anthropic SDK** — Claude claude-sonnet-4-6 for PDF data extraction
-- **pyodbc + azure-identity** — Fabric Warehouse via Azure AD Service Principal
 - **python-dotenv** — config from `.env` file via `dotenv_values()` (no `os.environ`)
+- **paramiko** — SFTP (SSH) upload. Host key trust-on-first-use via `AutoAddPolicy`, cached to `~/.ssh/known_hosts`
 
 ## Key Conventions
 
@@ -54,23 +55,42 @@ First run opens a browser for Gmail OAuth2 consent. Subsequent runs are non-inte
 
 All config lives in `.env`, read by `config.py` using `dotenv_values()`. No `os.environ.get()`. File paths (credentials, token, log) resolve relative to project root.
 
+### Store Mapping
+
+Store email → store code mapping is configured via `STORE_MAP` in `.env` as a JSON object:
+```
+STORE_MAP={"sydney@owndays.com.au": "OWND01", "owndaysburwood@gmail.com": "OWND02"}
+```
+
+### JSON Output Format
+
+One JSON file per store per day: `AU_Owndays_{StoreCode}_{YYYYMMDD}_{HHmmss}.json`
+
+Each file is an array of transaction objects:
+```json
+[
+    {
+        "PartnerTransaction_ID": "137976",
+        "StoreCode": "OWND03",
+        "TxDate": "2026-03-19T00:00:00",
+        "Register_ID": 1,
+        "LineItems": [{"LineNumber": 1, "Item": {"Type": "Product", "ProductCodeType": "PLU_ColorSize", "ProductCode": "Dummy", "ColorDesc": "NA", "SizeDesc": "NA", "Qty": 1, "RetailPrice": 200.00, "SoldPrice": 181.82}}],
+        "Payment": [{"PaymentMethodCode": "VISA", "Amount": 181.82}],
+        "Tax": {"TaxAmount": 18.18, "TaxIncludedInLineItem": true}
+    }
+]
+```
+
+RetailPrice, SoldPrice, and Payment Amount all use Amount (Inc Tax). TaxAmount uses Tax from the Banking Transaction Report.
+
 ### Error Handling
 
 - Parse failure → email stays unread, counted as failed
-- Write failure → rollback, email stays unread, counted as failed
-- Store not found in `Dim_Store` → email stays unread, counted as skipped
+- JSON write failure → email stays unread, counted as failed
+- SFTP upload failure → email stays unread, counted as failed
+- Store not found in `STORE_MAP` → email stays unread, counted as skipped
 - Gmail fetch failure → abort run, send error notification
 - SMTP notification sent on completion (success or failure)
-
-### Fabric Warehouse Specifics
-
-- Schema: `ownd`
-- Tables: `Dim_Store`, `Dim_PaymentMethod`, `Fact_EOD_Summary`, `Fact_EOD_Transaction`
-- Identity columns are auto-generated BIGINT — do NOT insert explicit values
-- `@@IDENTITY`, `SCOPE_IDENTITY()`, and `OUTPUT INSERTED` are all unsupported
-- Retrieve generated IDs by querying back with unique key (report_date + store_id + _processed_at)
-- Use `VARCHAR` not `NVARCHAR`, `DATETIME2(6)` for timestamps
-- Duplicate handling: atomic delete-and-reinsert (transactions first, then summary)
 
 ### Gmail Data
 

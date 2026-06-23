@@ -17,46 +17,33 @@ logger = logging.getLogger(__name__)
 _EXTRACTION_PROMPT_TEMPLATE = """\
 You are extracting data from an End of Day (EOD) report email for an optical retail store.
 
-The email contains PDF attachments. Find the **Payment Detail by Payment Type** PDF — it has columns: Date, Ref-No, Name, Tax Paid, Payment (Inc Tax)$, Consult $, Frame $, Lens $, CL $, Sundry $, Misc $. Rows are grouped under "Payment Type: XXX" section headers. Ignore other PDFs (e.g. "Banking Transaction Report", "BulkBillingSummaryReport", "DailyTallyReport", "ScannedDocument").
+The email contains PDF attachments. Find the **Banking Transaction Report** PDF — it has columns: Date, Receipt, Paid By, Patient / Payer, Amount (Inc Tax) $, Tax $, Amount (Exc Tax) $. Rows are grouped by payment method sections. Ignore other PDFs (e.g. "PaymentDetailByPaymentType", "BulkBillingSummaryReport", "DailyTallyReport", "ScannedDocument").
 
 Extract the following and return as a single JSON object (no markdown, no preamble, ONLY valid JSON):
 
-From the email body text below:
-- "report_date": the report date in YYYY-MM-DD format
-- "store_name": the store name
-- "target_exc_gst": daily target excluding GST (numeric, no $ or commas)
-- "consultation": consultation count or value (numeric)
-- "no_customers": number of customers (integer)
-- "daily_comment": any daily comment text (string, empty string if none)
-- "customer_feedback": any customer feedback text (string, empty string if none)
-
-From the Payment Detail by Payment Type PDF:
-- "total_inc_gst": grand total Payment (Inc Tax) from the last row of the last page (numeric, no $ or commas)
-- "total_tax": grand total Tax Paid from the last row of the last page (numeric, no $ or commas)
-- "total_exc_gst": derived as total_inc_gst - total_tax (numeric)
-- "total_consult": grand total Consult $ (numeric)
-- "total_frame": grand total Frame $ (numeric)
-- "total_lens": grand total Lens $ (numeric)
-- "total_cl": grand total CL $ (numeric)
-- "total_sundry": grand total Sundry $ (numeric)
-- "total_misc": grand total Misc $ (numeric)
-- "transaction_count": number of individual transaction rows (exclude per-payment-type subtotal rows and the grand total row)
-- "transactions": array of objects, one per transaction row (exclude subtotal and grand total rows):
-  - "receipt_no": Ref-No column (string, empty string if none e.g. for DDEP/Medicare rows)
-  - "payment_method": the Payment Type section header the row belongs to, exactly as shown (e.g. "MASTER", "HC", "DDEP", "VISA", "EFTPOS", "CASH", "zMP")
-  - "customer_name": Name column — the name portion only, without the ID number (string)
-  - "customer_id": the number after the last dash in the Name column (string, empty string if none e.g. for Medicare)
-  - "amount_inc_tax": Payment (Inc Tax)$ column (numeric, no $ or commas)
-  - "tax": Tax Paid column (numeric, no $ or commas)
-  - "amount_exc_tax": derived as amount_inc_tax - tax (numeric)
-  - "consult": Consult $ column (numeric)
-  - "frame": Frame $ column (numeric)
-  - "lens": Lens $ column (numeric)
-  - "cl": CL $ column (numeric)
-  - "sundry": Sundry $ column (numeric)
-  - "misc": Misc $ column (numeric)
+- "report_date": the report date from the PDF Period field in YYYY-MM-DD format
+- "total_inc_tax": Total Amount (Inc Tax) from the last row (numeric, no $ or commas)
+- "total_tax": Total Tax from the last row (numeric, no $ or commas)
+- "total_exc_tax": Total Amount (Exc Tax) from the last row (numeric, no $ or commas)
+- "transaction_count": number of individual transaction rows (exclude Sub Total rows and the Total Amount row)
+- "transactions": array of objects, one per transaction row (exclude Sub Total and Total Amount rows):
+  - "receipt_no": Receipt column (string, empty string if none e.g. for DDEP/Medicare rows)
+  - "payment_method": Paid By column exactly as shown (e.g. "MASTER", "HC", "DDEP", "VISA", "EFTPOS", "CASH", "zMP", "Afterpay", "AX")
+  - "customer_name": Patient / Payer column — the name portion only, without the ID in parentheses (string)
+  - "customer_id": the number in parentheses after # in the Patient / Payer column (string, empty string if none e.g. for Medicare)
+  - "amount_inc_tax": Amount (Inc Tax) $ column (numeric, no $ or commas)
+  - "tax": Tax $ column (numeric, no $ or commas)
+  - "amount_exc_tax": Amount (Exc Tax) $ column (numeric, no $ or commas)
 
 Remove $ signs and commas from ALL numeric values. Return numbers as numbers, not strings.
+
+CRITICAL — column alignment when Receipt is empty:
+"DDEP" is ALWAYS a payment method, NEVER a receipt number. When you see a row like
+  "24/05/2026 DDEP Medicare 198.75 0.00 198.75"
+the Receipt column is empty and the columns map as:
+  receipt_no="", payment_method="DDEP", customer_name="Medicare", customer_id="",
+  amount_inc_tax=198.75, tax=0, amount_exc_tax=198.75
+Do NOT shift "DDEP" left into receipt_no. Receipt numbers are always all-digit values like "142139".
 
 EMAIL BODY:
 {email_body}"""

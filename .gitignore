@@ -3,3 +3,17 @@ gmail_token.json
 .env
 eod_processor.log
 __pycache__/
+
+# Graph certificate / private key material — never commit
+secrets/
+*.pem
+*.pfx
+*.cer
+
+# Local / real sales data — never commit
+output/
+docs/check/
+docs/pdf reports sample/
+
+# Editor
+.vscode/

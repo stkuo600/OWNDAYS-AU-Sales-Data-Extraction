@@ -1,11 +1,11 @@
 """
 main.py — Entry point for the OWNDAYS EOD Report Processor.
 
-Orchestrates: Gmail fetch → Claude parse → JSON write → FTP upload → mark as read.
+Orchestrates: Graph fetch → Claude parse → JSON write → FTP upload → mark as read.
 
 Backfill mode (--from / --to YYYY-MM-DD):
     Fetches emails in the given date range from configured store senders,
-    writes JSON locally only. Skips SFTP upload, Gmail mark-as-read,
+    writes JSON locally only. Skips SFTP upload, mark-as-read,
     dedup, and email notifications.
 """
 
@@ -14,11 +14,10 @@ import logging
 import smtplib
 import sys
 import traceback
-from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 
 import config
-import gmail_reader
+import graph_reader
 import claude_parser
 import json_writer
 import ftp_uploader
@@ -30,7 +29,7 @@ def deduplicate_emails(emails):
     """Drop duplicate emails, keeping the first occurrence of each store/day.
 
     An email is a duplicate only if BOTH its sender address and its send_date
-    match an already-seen email. Gmail returns newest-first, so the first
+    match an already-seen email. Emails are ordered newest-first, so the first
     occurrence of a (sender, send_date) pair wins. Two different days' reports
     from the same store are NOT duplicates and are both kept.
 
@@ -110,6 +109,9 @@ def _parse_args():
                         help="Backfill start date (YYYY-MM-DD, inclusive)")
     parser.add_argument("--to", dest="to_date",
                         help="Backfill end date (YYYY-MM-DD, inclusive)")
+    parser.add_argument("--live", action="store_true",
+                        help="In backfill mode, also run side effects (SFTP upload + "
+                             "mark-as-read). Use for a scoped, controlled production run.")
     return parser.parse_args()
 
 
@@ -122,11 +124,19 @@ def main():
     if backfill and not (args.from_date and args.to_date):
         logger.error("--from and --to must both be provided for backfill mode")
         sys.exit(2)
+    if args.live and not backfill:
+        logger.error("--live only applies to backfill mode (use with --from/--to)")
+        sys.exit(2)
+
+    # Side effects (SFTP upload + mark-as-read) run in normal mode always, and in
+    # backfill mode only when --live is given (a scoped, controlled production run).
+    side_effects = (not backfill) or args.live
 
     logger.info("=" * 60)
     if backfill:
-        logger.info("EOD Processor — BACKFILL run %s to %s (local JSON only)",
-                    args.from_date, args.to_date)
+        logger.info("EOD Processor — BACKFILL run %s to %s (%s)",
+                    args.from_date, args.to_date,
+                    "LIVE: SFTP + mark-as-read" if args.live else "local JSON only")
     else:
         logger.info("EOD Processor — starting run")
     logger.info("=" * 60)
@@ -138,35 +148,34 @@ def main():
     store_results = []  # (store_name, report_date, total_exc_gst, txn_count, status)
 
     try:
-        service = gmail_reader.get_gmail_service()
+        token = graph_reader.get_graph_token()
         if backfill:
-            # Gmail 'before:' is exclusive — add one day so the end date is inclusive.
-            after = datetime.strptime(args.from_date, "%Y-%m-%d").strftime("%Y/%m/%d")
-            before = (datetime.strptime(args.to_date, "%Y-%m-%d")
-                      + timedelta(days=1)).strftime("%Y/%m/%d")
-            emails = gmail_reader.fetch_emails_in_date_range(
-                service, after, before, list(config.STORE_MAP.keys())
+            # from_date/to_date are inclusive local dates; graph_reader handles the
+            # exclusive upper bound and timezone conversion.
+            emails = graph_reader.fetch_emails_in_date_range(
+                token, args.from_date, args.to_date,
+                list(config.STORE_MAP.keys()) + config.STORE_FORWARDER_ADDRESSES,
             )
             logger.info("Found %d emails in date range", len(emails))
         else:
-            emails = gmail_reader.fetch_unread_emails(service)
+            emails = graph_reader.fetch_unread_emails(token)
             logger.info("Found %d unread emails with PDF attachments", len(emails))
     except Exception:
-        logger.exception("Failed to fetch emails from Gmail")
+        logger.exception("Failed to fetch emails from Microsoft Graph")
         send_notification(
-            "[EOD Processor] ERROR — Gmail fetch failed",
+            "[EOD Processor] ERROR — Graph fetch failed",
             f"<pre>{traceback.format_exc()}</pre>",
             config.SMTP_TO_ERROR,
         )
         return
 
     # Deduplicate: keep the latest email per store per day (sender, send_date).
-    # Gmail returns newest first, so the first occurrence wins.
+    # graph_reader returns messages newest-first, so the first occurrence wins.
     emails, duplicate_ids = deduplicate_emails(emails)
 
-    if backfill:
-        # Backfill writes local JSON only — leave Gmail state untouched, so
-        # duplicates are simply skipped rather than marked as read.
+    if not side_effects:
+        # Local JSON only — leave mailbox state untouched, so duplicates are
+        # simply skipped rather than marked as read.
         if duplicate_ids:
             logger.info("Skipping %d duplicate email(s)", len(duplicate_ids))
         logger.info("Processing %d unique email(s) in backfill mode", len(emails))
@@ -175,7 +184,7 @@ def main():
             logger.info("Marking %d duplicate email(s) as read", len(duplicate_ids))
             for dup_id in duplicate_ids:
                 try:
-                    gmail_reader.mark_as_read(service, dup_id)
+                    graph_reader.mark_as_read(token, dup_id)
                 except Exception:
                     logger.exception("Failed to mark duplicate %s as read", dup_id)
 
@@ -196,54 +205,57 @@ def main():
             failed_count += 1
             continue
 
-        store_code = config.STORE_MAP.get(sender, "Unknown")
+        store_code = config.resolve_store_code(
+            sender, email_data.get("sender_name", ""), email_data.get("body", "")
+        )
+        store_label = store_code or "Unknown"
         report_date = parsed.get("report_date", "")
         total_exc_tax = parsed.get("total_exc_tax", 0)
         txn_count = len(parsed.get("transactions", []))
 
         logger.info("Parsed: date=%s store=%s transactions=%d",
-                     report_date, store_code, txn_count)
+                     report_date, store_label, txn_count)
 
         # Write JSON file
-        result, file_path = json_writer.write_json(parsed)
+        result, file_path = json_writer.write_json(parsed, store_code)
 
         if result == "skipped":
             logger.warning("Skipped email from=%s — store not found in STORE_MAP, NOT marked as read", sender)
             errors.append(f"Skipped (store not found): {sender} — {subject}")
-            store_results.append((store_code, report_date, total_exc_tax, txn_count, "SKIPPED"))
+            store_results.append((store_label, report_date, total_exc_tax, txn_count, "SKIPPED"))
             skipped_count += 1
             continue
 
         if result == "error":
             logger.error("Failed to write JSON for email from=%s — NOT marked as read", sender)
             errors.append(f"JSON write failed: {sender} — {subject}")
-            store_results.append((store_code, report_date, total_exc_tax, txn_count, "FAILED"))
+            store_results.append((store_label, report_date, total_exc_tax, txn_count, "FAILED"))
             failed_count += 1
             continue
 
-        # Upload to FTP (skipped in backfill mode)
-        if config.FTP_HOST and not backfill:
+        # Upload to SFTP (skipped unless side effects are enabled)
+        if config.FTP_HOST and side_effects:
             ftp_ok = ftp_uploader.upload_file(file_path)
             if not ftp_ok:
                 logger.error("FTP upload failed for %s — email NOT marked as read", file_path)
                 errors.append(f"FTP upload failed: {sender} — {subject}")
-                store_results.append((store_code, report_date, total_exc_tax, txn_count, "FTP FAILED"))
+                store_results.append((store_label, report_date, total_exc_tax, txn_count, "FTP FAILED"))
                 failed_count += 1
                 continue
 
-        # Mark as read (skipped in backfill mode — leave Gmail state untouched)
-        if not backfill:
+        # Mark as read (skipped unless side effects are enabled — leave mailbox untouched)
+        if side_effects:
             try:
-                gmail_reader.mark_as_read(service, message_id)
+                graph_reader.mark_as_read(token, message_id)
                 logger.info("Success — email marked as read")
-                store_results.append((store_code, report_date, total_exc_tax, txn_count, "OK"))
+                store_results.append((store_label, report_date, total_exc_tax, txn_count, "OK"))
             except Exception:
                 logger.exception("Data written but failed to mark email as read: message_id=%s", message_id)
                 errors.append(f"Mark-as-read failed (data written): {sender} — {subject}")
-                store_results.append((store_code, report_date, total_exc_tax, txn_count, "OK*"))
+                store_results.append((store_label, report_date, total_exc_tax, txn_count, "OK*"))
         else:
-            logger.info("Success — JSON written (Gmail untouched)")
-            store_results.append((store_code, report_date, total_exc_tax, txn_count, "OK"))
+            logger.info("Success — JSON written (mailbox untouched)")
+            store_results.append((store_label, report_date, total_exc_tax, txn_count, "OK"))
         success_count += 1
 
     logger.info("=" * 60)

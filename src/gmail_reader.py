@@ -221,17 +221,28 @@ def _extract_pdf_attachments(service, user_id: str, message_id: str, payload: di
 # ---------------------------------------------------------------------------
 
 def fetch_unread_emails(service) -> list:
-    """Fetch unread emails that contain at least one PDF attachment.
+    """Fetch unread emails that contain at least one PDF attachment."""
+    return _fetch_emails(service, "is:unread has:attachment")
 
-    Queries Gmail for messages matching ``is:unread has:attachment``, then
-    retrieves each message in full to extract headers, body text, and PDF
-    attachments.  Messages with no PDF attachments are skipped (logged at
-    DEBUG level).
+
+def fetch_emails_in_date_range(service, after_date: str, before_date: str, senders: list) -> list:
+    """Fetch emails from the given senders in a date range.
 
     Parameters
     ----------
-    service:
-        Authorised Gmail API service object (from :func:`get_gmail_service`).
+    after_date, before_date:
+        Dates in ``YYYY/MM/DD`` format. Gmail treats ``after:`` as inclusive
+        and ``before:`` as exclusive.
+    senders:
+        Iterable of sender email addresses to scope the search.
+    """
+    from_clause = " OR ".join(f"from:{s}" for s in senders)
+    query = f"after:{after_date} before:{before_date} has:attachment ({from_clause})"
+    return _fetch_emails(service, query)
+
+
+def _fetch_emails(service, query: str) -> list:
+    """Fetch messages matching *query*, returning PDF-bearing emails.
 
     Returns
     -------
@@ -243,12 +254,12 @@ def fetch_unread_emails(service) -> list:
                 "sender_name":  str,
                 "sender_email": str,
                 "subject":      str,
+                "send_date":    str,  # YYYY-MM-DD in sender's timezone
                 "body":         str,
                 "attachments":  [{"filename": str, "data_base64": str}],
             }
     """
     user_id = "me"
-    query = "is:unread has:attachment"
     logger.info("Searching Gmail with query: '%s'", query)
 
     all_messages = []
@@ -291,6 +302,18 @@ def fetch_unread_emails(service) -> list:
         # --- Subject ---
         subject = headers.get("Subject", "")
 
+        # --- Send date (sender's local timezone). Fallback to Gmail internalDate (UTC). ---
+        send_date = ""
+        try:
+            sent_dt = email.utils.parsedate_to_datetime(headers.get("Date", ""))
+            if sent_dt is not None:
+                send_date = sent_dt.strftime("%Y-%m-%d")
+        except (TypeError, ValueError):
+            internal_ms = int(message.get("internalDate", 0))
+            if internal_ms:
+                from datetime import datetime as _dt
+                send_date = _dt.utcfromtimestamp(internal_ms / 1000).strftime("%Y-%m-%d")
+
         # --- Body ---
         body = _extract_text_body(payload)
 
@@ -308,6 +331,7 @@ def fetch_unread_emails(service) -> list:
             "sender_name": sender_name,
             "sender_email": sender_email,
             "subject": subject,
+            "send_date": send_date,
             "body": body,
             "attachments": pdf_attachments,
         }
@@ -322,15 +346,35 @@ def fetch_unread_emails(service) -> list:
         emails.append(email_dict)
 
     logger.info(
-        "Returning %d email(s) with PDF attachments out of %d unread message(s).",
+        "Returning %d email(s) with PDF attachments out of %d matching message(s).",
         len(emails),
         len(messages),
     )
     return emails
 
 
+_eod_processed_label_id = None
+
+
+def _get_eod_processed_label_id(service):
+    """Look up and cache the Gmail label ID for 'EOD_Processed'."""
+    global _eod_processed_label_id
+    if _eod_processed_label_id is not None:
+        return _eod_processed_label_id
+
+    results = service.users().labels().list(userId="me").execute()
+    for label in results.get("labels", []):
+        if label["name"] == "EOD_Processed":
+            _eod_processed_label_id = label["id"]
+            logger.debug("Resolved EOD_Processed label ID: %s", _eod_processed_label_id)
+            return _eod_processed_label_id
+
+    logger.warning("Label 'EOD_Processed' not found in Gmail — skipping label tagging.")
+    return None
+
+
 def mark_as_read(service, message_id: str) -> None:
-    """Remove the UNREAD label from the specified Gmail message.
+    """Remove the UNREAD label and add EOD_Processed label to the specified Gmail message.
 
     Parameters
     ----------
@@ -339,9 +383,15 @@ def mark_as_read(service, message_id: str) -> None:
     message_id:
         The Gmail message ID to mark as read.
     """
+    modify_body = {"removeLabelIds": ["UNREAD"]}
+
+    label_id = _get_eod_processed_label_id(service)
+    if label_id:
+        modify_body["addLabelIds"] = [label_id]
+
     service.users().messages().modify(
         userId="me",
         id=message_id,
-        body={"removeLabelIds": ["UNREAD"]},
+        body=modify_body,
     ).execute()
-    logger.info("Marked message %s as read.", message_id)
+    logger.info("Marked message %s as read and labelled EOD_Processed.", message_id)

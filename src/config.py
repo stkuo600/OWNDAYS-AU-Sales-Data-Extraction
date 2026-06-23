@@ -28,6 +28,10 @@ GRAPH_CERT_KEY_FILE = (
     str(_PROJECT_ROOT / _env["GRAPH_CERT_KEY_FILE"]) if _env.get("GRAPH_CERT_KEY_FILE") else None
 )
 GRAPH_CLIENT_SECRET = _env.get("GRAPH_CLIENT_SECRET")  # dev only
+# Public certificate (.cer) — used only to monitor expiry and warn ahead of time.
+GRAPH_CERT_FILE = str(_PROJECT_ROOT / _env.get("GRAPH_CERT_FILE", "secrets/eod-mail-reader.cer"))
+# Warn in the run notification when the certificate is within this many days of expiry.
+GRAPH_CERT_WARN_DAYS = int(_env.get("GRAPH_CERT_WARN_DAYS") or "30")
 
 # Timezone used to derive send_date (local calendar day) from Graph UTC datetimes.
 REPORT_TIMEZONE = _env.get("REPORT_TIMEZONE", "Australia/Sydney")

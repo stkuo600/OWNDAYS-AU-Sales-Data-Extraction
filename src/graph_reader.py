@@ -16,6 +16,7 @@ Public functions (mirror the old gmail_reader API; ``service`` is replaced by a 
 """
 
 import logging
+import os
 import time
 import urllib.parse
 from datetime import datetime, timedelta
@@ -92,6 +93,31 @@ def get_graph_token() -> str:
 
     logger.info("Acquired Microsoft Graph app-only token.")
     return result["access_token"]
+
+
+def cert_days_until_expiry():
+    """Return whole days until the configured certificate expires, or None if unknown.
+
+    Reads the public certificate at ``config.GRAPH_CERT_FILE`` (the private-key PEM does
+    not carry an expiry date). Returns None when no cert file is present or it can't be
+    parsed — e.g. when running with a client secret instead of a certificate.
+    """
+    cert_file = getattr(config, "GRAPH_CERT_FILE", None)
+    if not cert_file or not os.path.exists(cert_file):
+        return None
+    try:
+        from cryptography import x509
+        with open(cert_file, "rb") as f:
+            cert = x509.load_pem_x509_certificate(f.read())
+        try:
+            not_after = cert.not_valid_after_utc
+        except AttributeError:  # cryptography < 42
+            from datetime import timezone
+            not_after = cert.not_valid_after.replace(tzinfo=timezone.utc)
+        return (not_after - datetime.now(ZoneInfo("UTC"))).days
+    except Exception:
+        logger.warning("Could not read certificate expiry from %s", cert_file, exc_info=True)
+        return None
 
 
 # ---------------------------------------------------------------------------

@@ -263,6 +263,21 @@ def main():
                 success_count, failed_count, skipped_count)
     logger.info("=" * 60)
 
+    # Certificate expiry check — warn ahead of time so the cert is rotated before it lapses.
+    cert_days = graph_reader.cert_days_until_expiry()
+    cert_warning_html = ""
+    if cert_days is not None and cert_days <= config.GRAPH_CERT_WARN_DAYS:
+        warn_msg = (f"Graph certificate expires in {cert_days} day(s) — rotate it soon "
+                    f"(scripts/generate_graph_cert.py; see migration plan §2/§4).")
+        logger.warning(warn_msg)
+        cert_warning_html = (
+            "<div style='margin-top:16px;padding:12px;background:#fff3e0;"
+            "border-left:4px solid #e65100;border-radius:4px'>"
+            f"<b>⚠ Certificate expiry:</b> {warn_msg}</div>"
+        )
+    elif cert_days is not None:
+        logger.info("Graph certificate expires in %d day(s).", cert_days)
+
     # Build HTML notification
     total = success_count + failed_count + skipped_count
 
@@ -286,6 +301,7 @@ def main():
             f"<div style='background:{title_color};color:#fff;padding:16px 20px;border-radius:6px 6px 0 0'>"
             f"<h2 style='margin:0;font-size:18px'>EOD Processor Report</h2></div>"
             f"<div style='padding:20px;background:#fafafa;border:1px solid #e0e0e0;border-top:none;border-radius:0 0 6px 6px'>"
+            f"{cert_warning_html}"
             f"<table style='margin-bottom:16px'>"
             f"<tr><td style='padding:2px 16px 2px 0;color:#666'>Success</td><td><b>{success_count}</b></td></tr>"
             f"<tr><td style='padding:2px 16px 2px 0;color:#666'>Failed</td><td><b>{failed_count}</b></td></tr>"

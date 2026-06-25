@@ -10,7 +10,7 @@ development. See docs/gmail-to-m365-migration-plan.md.
 
 Public functions (mirror the old gmail_reader API; ``service`` is replaced by a bearer ``token``):
   - get_graph_token()                  : acquire an app-only Graph access token
-  - fetch_unread_emails(token)         : unread emails that carry PDF attachments
+  - fetch_unprocessed_emails(token)    : not-yet-processed (no EOD_Processed category) PDF emails
   - fetch_emails_in_date_range(...)    : emails from given senders within a date range (backfill)
   - mark_as_read(token, message_id)    : set isRead=true and tag the 'EOD_Processed' category
 """
@@ -33,15 +33,22 @@ _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 _SCOPES = ["https://graph.microsoft.com/.default"]  # the only legal scope for client-credentials
 
 # Fields requested per message. 'body' is returned as plain text via the Prefer header below.
-_MESSAGE_SELECT = "id,subject,from,sentDateTime,receivedDateTime,hasAttachments,body"
+# 'categories' lets us tell processed mail apart without trusting the read/unread flag.
+_MESSAGE_SELECT = "id,subject,from,sentDateTime,receivedDateTime,hasAttachments,body,categories"
 _PREFER_TEXT_BODY = 'outlook.body-content-type="text"'
 _PAGE_SIZE = 50
 
 # Transport-layer retry for throttling (429) and transient 5xx. This is NOT business retry —
-# the "unread email = retry queue" model in main.py is unchanged.
+# the "unprocessed email = retry queue" model in main.py is unchanged.
 _MAX_RETRIES = 4
 
 _PROCESSED_CATEGORY = "EOD_Processed"
+
+# Normal runs treat "unprocessed" as the work queue, identified by the ABSENCE of the
+# EOD_Processed category rather than the read/unread flag — a recipient opening the mail
+# in the shared mailbox before the scheduled run must not cause it to be skipped. The
+# lookback window bounds the server query so it does not page the whole mailbox history.
+_UNPROCESSED_LOOKBACK_DAYS = 30
 
 # Module-level MSAL app cache (one confidential-client app per process).
 _msal_app = None
@@ -258,12 +265,18 @@ def _fetch_pdf_attachments(token: str, message_id: str) -> list:
     return attachments
 
 
-def _fetch_emails(token: str, odata_filter: str, sender_filter: set = None) -> list:
+def _fetch_emails(token: str, odata_filter: str, sender_filter: set = None,
+                  exclude_processed: bool = False) -> list:
     """Fetch messages matching *odata_filter*, returning PDF-bearing email dicts.
 
     When *sender_filter* is provided, messages whose sender is not in the set are dropped
     BEFORE the (per-message) attachment fetch. Filtering senders client-side avoids the
     Graph 'InefficientFilter' errors that combining sender + date $filter clauses can raise.
+
+    When *exclude_processed* is True, messages already tagged with the EOD_Processed
+    category are dropped — this is the normal-run work-queue filter (see
+    :func:`fetch_unprocessed_emails`). Backfill leaves it False so already-processed
+    emails can be reprocessed deliberately.
 
     Returns
     -------
@@ -290,6 +303,12 @@ def _fetch_emails(token: str, odata_filter: str, sender_filter: set = None) -> l
     emails = []
     for message in messages:
         msg_id = message["id"]
+
+        if exclude_processed and _PROCESSED_CATEGORY in (message.get("categories") or []):
+            logger.debug(
+                "Message %s already categorised %s — skipping.", msg_id, _PROCESSED_CATEGORY
+            )
+            continue
 
         from_addr = (message.get("from") or {}).get("emailAddress") or {}
         sender_email = from_addr.get("address", "")
@@ -337,9 +356,27 @@ def _fetch_emails(token: str, odata_filter: str, sender_filter: set = None) -> l
 # Public API
 # ---------------------------------------------------------------------------
 
-def fetch_unread_emails(token: str) -> list:
-    """Fetch unread emails that contain at least one PDF attachment."""
-    return _fetch_emails(token, "isRead eq false and hasAttachments eq true")
+def fetch_unprocessed_emails(token: str) -> list:
+    """Fetch not-yet-processed emails (no EOD_Processed category) with PDF attachments.
+
+    'Processed' is keyed off the EOD_Processed category that :func:`mark_as_read` applies
+    on success — NOT the read/unread flag. This makes the work queue robust to a recipient
+    opening the mail in the shared mailbox before the scheduled run (the 2026-06-24
+    Chatswood incident). The server query is bounded to the last
+    ``_UNPROCESSED_LOOKBACK_DAYS`` days so it does not page the entire mailbox each run.
+
+    The result is scoped to known store/forwarder senders. Dropping the ``isRead`` filter
+    means the category becomes the only "done" marker, so unrelated attachment-bearing mail
+    in the shared mailbox would otherwise enter the pipeline and risk mis-attribution; the
+    sender allow-list (mirroring :func:`fetch_emails_in_date_range`) keeps it out.
+    """
+    after_date = (
+        datetime.now(ZoneInfo(config.REPORT_TIMEZONE)) - timedelta(days=_UNPROCESSED_LOOKBACK_DAYS)
+    ).strftime("%Y-%m-%d")
+    after_utc = _local_date_to_utc_literal(after_date)
+    odata_filter = f"receivedDateTime ge {after_utc} and hasAttachments eq true"
+    senders = set(config.STORE_MAP.keys()) | set(config.STORE_FORWARDER_ADDRESSES)
+    return _fetch_emails(token, odata_filter, sender_filter=senders, exclude_processed=True)
 
 
 def fetch_emails_in_date_range(token: str, from_date: str, to_date: str, senders) -> list:

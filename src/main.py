@@ -158,8 +158,8 @@ def main():
             )
             logger.info("Found %d emails in date range", len(emails))
         else:
-            emails = graph_reader.fetch_unread_emails(token)
-            logger.info("Found %d unread emails with PDF attachments", len(emails))
+            emails = graph_reader.fetch_unprocessed_emails(token)
+            logger.info("Found %d unprocessed emails with PDF attachments", len(emails))
     except Exception:
         logger.exception("Failed to fetch emails from Microsoft Graph")
         send_notification(

@@ -12,8 +12,9 @@ secrets/
 
 # Local / real sales data — never commit
 output/
-docs/check/
-docs/pdf reports sample/
+
+# Docs are kept local-only, not synced to GitHub
+docs/
 
 # Editor
 .vscode/

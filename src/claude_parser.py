@@ -45,6 +45,16 @@ the Receipt column is empty and the columns map as:
   amount_inc_tax=198.75, tax=0, amount_exc_tax=198.75
 Do NOT shift "DDEP" left into receipt_no. Receipt numbers are always all-digit values like "142139".
 
+CRITICAL — receipt_no is empty ONLY for DDEP/Medicare rows:
+A DDEP (Medicare direct deposit) row is the ONLY row type printed with no Receipt.
+EVERY other row — VISA, EFTPOS, HC, MASTER, AX, zBUPA, CASH, Afterpay, zMP, etc. —
+ALWAYS has an all-digit Receipt number (e.g. "145258") in the Receipt column, and you
+MUST copy it verbatim into receipt_no. Never output receipt_no="" for a non-DDEP row.
+Watch the row directly ABOVE a DDEP/Medicare row especially: it is a normal
+receipt-bearing row (e.g. an EFTPOS payment) and must keep its own receipt number —
+do NOT let the adjacent empty-receipt DDEP row cause you to blank it out. If any
+non-DDEP row looks like it has no receipt, re-read that row; the number is there.
+
 EMAIL BODY:
 {email_body}"""
 

@@ -14,6 +14,7 @@ import logging
 import smtplib
 import sys
 import traceback
+from datetime import date
 from email.mime.text import MIMEText
 
 import config
@@ -24,17 +25,22 @@ import ftp_uploader
 
 logger = logging.getLogger(__name__)
 
+# A report older than this (relative to its email's send date) is treated as a misread date.
+REPORT_DATE_MAX_AGE_DAYS = 14
+
 
 def deduplicate_emails(emails):
-    """Drop duplicate emails, keeping the first occurrence of each store/day.
+    """Drop duplicate reports, keeping the first occurrence of each store/day.
 
-    An email is a duplicate only if BOTH its sender address and its send_date
-    match an already-seen email. Emails are ordered newest-first, so the first
-    occurrence of a (sender, send_date) pair wins. Two different days' reports
-    from the same store are NOT duplicates and are both kept.
+    Runs AFTER parsing. An email is a duplicate only if BOTH its store and its
+    parsed report_date match an already-seen email. The day is the report's own
+    date, not the send date: a store that sends yesterday's report late (same
+    send day as today's) must not have it dropped. Emails are ordered
+    newest-first, so the first occurrence of a (store, report_date) pair wins.
 
     Args:
-        emails (list[dict]): Email dicts with ``sender_email`` and ``send_date``.
+        emails (list[dict]): Email dicts with ``store_code`` (falls back to
+            ``sender_email`` when unknown) and ``report_date``.
 
     Returns:
         tuple[list[dict], list[str]]: (unique_emails, duplicate_message_ids).
@@ -43,18 +49,46 @@ def deduplicate_emails(emails):
     unique_emails = []
     duplicate_ids = []
     for email_data in emails:
-        sender = email_data.get("sender_email", "unknown")
-        key = (sender, email_data.get("send_date"))
+        store = email_data.get("store_code") or email_data.get("sender_email", "unknown")
+        key = (store, email_data.get("report_date"))
         if key in seen:
             duplicate_ids.append(email_data["message_id"])
             logger.info(
-                "Duplicate email from=%s date=%s subject=%s — keeping first occurrence",
-                sender, email_data.get("send_date"), email_data.get("subject"),
+                "Duplicate report store=%s date=%s subject=%s — keeping first occurrence",
+                store, email_data.get("report_date"), email_data.get("subject"),
             )
         else:
             seen.add(key)
             unique_emails.append(email_data)
     return unique_emails, duplicate_ids
+
+
+def validate_parsed(parsed, send_date=None):
+    """Return an error string if a parse result has no usable data, else None.
+
+    A parse can "succeed" yet contain nothing — e.g. the store forgot to attach
+    BankingTransactionReport.pdf, so the model returns an empty report_date and
+    no transactions. Treat that as a failure so the email stays unprocessed
+    and the run notification flags it.
+
+    When *send_date* is given, report_date must fall within the
+    REPORT_DATE_MAX_AGE_DAYS before it. This catches day/month swaps: the
+    2026-10-03 reports were read as 2026-03-10 and filed under March.
+    """
+    report_date = parsed.get("report_date")
+    if not report_date:
+        return "no report date (BankingTransactionReport.pdf missing?)"
+    if not parsed.get("transactions"):
+        return "no transactions (BankingTransactionReport.pdf missing?)"
+    if send_date:
+        try:
+            age = (date.fromisoformat(send_date) - date.fromisoformat(report_date)).days
+        except ValueError:
+            return f"unreadable report date {report_date!r}"
+        if not 0 <= age <= REPORT_DATE_MAX_AGE_DAYS:
+            return (f"report date {report_date} is implausible for an email sent "
+                    f"{send_date} (day/month swapped?)")
+    return None
 
 
 def setup_logging():
@@ -169,9 +203,46 @@ def main():
         )
         return
 
-    # Deduplicate: keep the latest email per store per day (sender, send_date).
+    # Parse every email first: dedup needs the report date, which only the parse knows.
+    parsed_emails = []
+    for email_data in emails:
+        sender = email_data.get("sender_email", "unknown")
+        subject = email_data.get("subject", "no subject")
+        logger.info("Processing email from=%s subject=%s", sender, subject)
+
+        # Parse with Claude
+        parsed = claude_parser.parse_eod_email(email_data)
+        if parsed is None:
+            logger.error("Failed to parse email from=%s — skipping", sender)
+            errors.append(f"Parse failed: {sender} — {subject}")
+            store_results.append((subject, "", "", "", "PARSE FAILED"))
+            failed_count += 1
+            continue
+
+        store_code = config.resolve_store_code(
+            sender, email_data.get("sender_name", ""), email_data.get("body", "")
+        )
+        logger.info("Parsed: date=%s store=%s transactions=%d",
+                     parsed.get("report_date", ""), store_code or "Unknown",
+                     len(parsed.get("transactions") or []))
+
+        problem = validate_parsed(parsed, email_data.get("send_date"))
+        if problem:
+            logger.error("Unusable parse for email from=%s subject=%s: %s — NOT marked as read",
+                         sender, subject, problem)
+            errors.append(f"Parse empty: {sender} — {subject} ({problem})")
+            store_results.append((store_code or subject, parsed.get("report_date", ""), "", 0, "NO DATA"))
+            failed_count += 1
+            continue
+
+        email_data["parsed"] = parsed
+        email_data["store_code"] = store_code
+        email_data["report_date"] = parsed["report_date"]
+        parsed_emails.append(email_data)
+
+    # Deduplicate: keep the latest email per (store, report_date).
     # graph_reader returns messages newest-first, so the first occurrence wins.
-    emails, duplicate_ids = deduplicate_emails(emails)
+    emails, duplicate_ids = deduplicate_emails(parsed_emails)
 
     if not side_effects:
         # Local JSON only — leave mailbox state untouched, so duplicates are
@@ -194,27 +265,12 @@ def main():
         sender = email_data.get("sender_email", "unknown")
         subject = email_data.get("subject", "no subject")
         message_id = email_data["message_id"]
-        logger.info("Processing email from=%s subject=%s", sender, subject)
-
-        # Parse with Claude
-        parsed = claude_parser.parse_eod_email(email_data)
-        if parsed is None:
-            logger.error("Failed to parse email from=%s — skipping", sender)
-            errors.append(f"Parse failed: {sender} — {subject}")
-            store_results.append((subject, "", "", "", "PARSE FAILED"))
-            failed_count += 1
-            continue
-
-        store_code = config.resolve_store_code(
-            sender, email_data.get("sender_name", ""), email_data.get("body", "")
-        )
+        parsed = email_data["parsed"]
+        store_code = email_data["store_code"]
         store_label = store_code or "Unknown"
-        report_date = parsed.get("report_date", "")
+        report_date = email_data["report_date"]
         total_exc_tax = parsed.get("total_exc_tax", 0)
-        txn_count = len(parsed.get("transactions", []))
-
-        logger.info("Parsed: date=%s store=%s transactions=%d",
-                     report_date, store_label, txn_count)
+        txn_count = len(parsed["transactions"])
 
         # Write JSON file
         result, file_path = json_writer.write_json(parsed, store_code)

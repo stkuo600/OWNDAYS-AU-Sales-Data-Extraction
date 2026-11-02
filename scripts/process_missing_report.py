@@ -17,12 +17,15 @@ Usage:
     --no-archive       Leave the PDF where it is (don't move into docs/check/archive).
     --archive-label X  Folder suffix under docs/check/archive/{today}-{X}
                        (default: "{store-name}-missing").
+    --allow-old        Accept a report date more than 60 days ago (deliberate
+                       old backfill). Future/empty dates are always rejected.
 
 Exit code 0 only when every requested step succeeded.
 """
 
 import argparse
 import base64
+import shutil
 import sys
 from datetime import date
 from pathlib import Path
@@ -36,6 +39,8 @@ import json_writer  # noqa: E402
 import ftp_uploader  # noqa: E402
 
 ARCHIVE_ROOT = _PROJECT_ROOT / "docs" / "check" / "archive"
+# Report dates older than this are refused unless --allow-old (catches misread Periods).
+MAX_REPORT_AGE_DAYS = 60
 
 
 def _infer_store(pdf_name, override):
@@ -67,6 +72,8 @@ def main():
     ap.add_argument("--no-upload", action="store_true", help="Skip SFTP upload (review JSON first).")
     ap.add_argument("--no-archive", action="store_true", help="Do not move the PDF into the archive.")
     ap.add_argument("--archive-label", help="Suffix for docs/check/archive/{today}-{label}.")
+    ap.add_argument("--allow-old", action="store_true",
+                    help=f"Accept a report date more than {MAX_REPORT_AGE_DAYS} days ago.")
     args = ap.parse_args()
 
     pdf = Path(args.pdf)
@@ -94,8 +101,16 @@ def main():
     txns = parsed.get("transactions", [])
     total_inc = parsed.get("total_inc_tax")
     sum_inc = round(sum(t.get("amount_inc_tax", 0) for t in txns), 2)
-    print(f"    report_date={report_date}  rows={len(txns)}  "
-          f"total_inc_tax={total_inc}  sum(rows)={sum_inc}")
+    print(f"    report_period={parsed.get('report_period', '')!r} -> report_date={report_date}  "
+          f"rows={len(txns)}  total_inc_tax={total_inc}  sum(rows)={sum_inc}")
+
+    # Date gate: an empty or implausible date means a bad Period read — don't file it.
+    if not report_date:
+        sys.exit("ERROR: no usable report date from the PDF Period field. NOT writing/uploading.")
+    age = (date.today() - date.fromisoformat(report_date)).days
+    if age < 0 or (age > MAX_REPORT_AGE_DAYS and not args.allow_old):
+        sys.exit(f"ERROR: report date {report_date} is {age} day(s) from today. If that is "
+                 f"really the right day, rerun with --allow-old. NOT writing/uploading.")
 
     # Integrity gate: the extracted rows must reconcile to the report's own total.
     if total_inc is None or abs(sum_inc - round(float(total_inc), 2)) > 0.01:
@@ -125,7 +140,7 @@ def main():
     dest_dir = ARCHIVE_ROOT / f"{date.today():%Y-%m-%d}-{label}"
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / pdf.name
-    pdf.replace(dest)
+    shutil.move(pdf, dest)  # not Path.replace: the PDF may be on another drive
     print(f">>> Archived PDF -> {dest.relative_to(_PROJECT_ROOT)}")
     print("DONE.")
     return 0

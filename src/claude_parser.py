@@ -9,10 +9,41 @@ Supports two providers (configured via AI_PROVIDER in .env):
 import json
 import logging
 import re
+from datetime import date
 
 import config
 
 logger = logging.getLogger(__name__)
+
+_AU_DATE_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b")
+
+
+def parse_report_period(period):
+    """Convert a Banking Transaction Report Period string to an ISO report date.
+
+    The model copies the Period verbatim (e.g. "3/10/2026 to 3/10/2026") and the
+    D/M/YYYY conversion happens here, deterministically. Letting the model convert
+    it swapped day and month on 2026-10-03 (read as 2026-03-10).
+
+    Returns "" when no date is found, the date is invalid, or the period spans
+    more than one day (one JSON file per store per day) — main.validate_parsed
+    then rejects the parse.
+    """
+    days = []
+    for d, m, y in _AU_DATE_RE.findall(period or ""):
+        try:
+            days.append(date(int(y), int(m), int(d)))
+        except ValueError:
+            logger.warning("Invalid date in report period %r", period)
+            return ""
+    if not days:
+        logger.warning("No D/M/YYYY date found in report period %r", period)
+        return ""
+    if len(set(days)) > 1:
+        logger.warning("Report period %r spans more than one day", period)
+        return ""
+    return days[0].isoformat()
+
 
 _EXTRACTION_PROMPT_TEMPLATE = """\
 You are extracting data from an End of Day (EOD) report email for an optical retail store.
@@ -21,7 +52,7 @@ The email contains PDF attachments. Find the **Banking Transaction Report** PDF 
 
 Extract the following and return as a single JSON object (no markdown, no preamble, ONLY valid JSON):
 
-- "report_date": the report date from the PDF Period field in YYYY-MM-DD format
+- "report_period": the PDF Period field copied EXACTLY as printed, character for character, e.g. "3/10/2026 to 3/10/2026". Do NOT reformat, reorder or convert it — dates are Australian D/M/YYYY and are converted in code
 - "total_inc_tax": Total Amount (Inc Tax) from the last row (numeric, no $ or commas)
 - "total_tax": Total Tax from the last row (numeric, no $ or commas)
 - "total_exc_tax": Total Amount (Exc Tax) from the last row (numeric, no $ or commas)
@@ -176,6 +207,9 @@ def parse_eod_email(email_data):
                 raw_text,
             )
             return None
+
+        # report_date is derived in code from the verbatim Period, never by the model.
+        parsed["report_date"] = parse_report_period(parsed.get("report_period", ""))
 
         # Attach email metadata
         parsed["sender_email"] = email_data.get("sender_email")

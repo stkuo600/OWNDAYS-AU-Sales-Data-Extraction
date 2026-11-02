@@ -225,7 +225,7 @@ def _list_messages(token: str, odata_filter: str) -> list:
     # Sort newest-first. We deliberately omit $orderby (combining it with the date-range
     # $filter risks Graph 'InefficientFilter' errors), so order it client-side. ISO 8601
     # datetimes sort lexically. main.py's dedup keeps the first occurrence per
-    # (sender, send_date), so this preserves the prior "newest wins" behaviour.
+    # (store, report_date), so this preserves the prior "newest wins" behaviour.
     messages.sort(key=lambda m: m.get("receivedDateTime", ""), reverse=True)
     return messages
 

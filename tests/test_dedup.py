@@ -106,6 +106,15 @@ class TestValidateParsed(unittest.TestCase):
         self.assertIsNone(main.validate_parsed(
             {"report_date": "2026-10-01", "transactions": [1]}, "2026-10-02"))
 
+    def test_month_late_resend_passes(self):
+        """The 2026-11-03 resends: Chatswood's 2 Oct report, 32 days late."""
+        self.assertIsNone(main.validate_parsed(
+            {"report_date": "2026-10-02", "transactions": [1]}, "2026-11-03"))
+
+    def test_report_past_age_limit_is_rejected(self):
+        self.assertIsNotNone(main.validate_parsed(
+            {"report_date": "2026-09-03", "transactions": [1]}, "2026-11-03"))
+
     def test_good_parse_passes(self):
         self.assertIsNone(main.validate_parsed(
             {"report_date": "2026-10-05", "transactions": [{"amount_inc_tax": 10}]}))

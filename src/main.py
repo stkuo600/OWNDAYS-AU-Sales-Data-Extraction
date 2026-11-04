@@ -26,7 +26,8 @@ import ftp_uploader
 logger = logging.getLogger(__name__)
 
 # A report older than this (relative to its email's send date) is treated as a misread date.
-REPORT_DATE_MAX_AGE_DAYS = 14
+# Generous on purpose: stores legitimately re-send reports a month or more late.
+REPORT_DATE_MAX_AGE_DAYS = 60
 
 
 def deduplicate_emails(emails):
@@ -72,8 +73,9 @@ def validate_parsed(parsed, send_date=None):
     and the run notification flags it.
 
     When *send_date* is given, report_date must fall within the
-    REPORT_DATE_MAX_AGE_DAYS before it. This catches day/month swaps: the
-    2026-10-03 reports were read as 2026-03-10 and filed under March.
+    REPORT_DATE_MAX_AGE_DAYS before it. This is a last-resort check on the
+    Period read (claude_parser converts the date itself): the 2026-10-03
+    reports were once read as 2026-03-10 and filed under March.
     """
     report_date = parsed.get("report_date")
     if not report_date:
@@ -85,9 +87,11 @@ def validate_parsed(parsed, send_date=None):
             age = (date.fromisoformat(send_date) - date.fromisoformat(report_date)).days
         except ValueError:
             return f"unreadable report date {report_date!r}"
-        if not 0 <= age <= REPORT_DATE_MAX_AGE_DAYS:
-            return (f"report date {report_date} is implausible for an email sent "
-                    f"{send_date} (day/month swapped?)")
+        if age < 0:
+            return f"report date {report_date} is after the email's send date {send_date}"
+        if age > REPORT_DATE_MAX_AGE_DAYS:
+            return (f"report date {report_date} is {age} days before the email's send date "
+                    f"{send_date} (limit {REPORT_DATE_MAX_AGE_DAYS})")
     return None
 
 
@@ -230,8 +234,10 @@ def main():
         if problem:
             logger.error("Unusable parse for email from=%s subject=%s: %s — NOT marked as read",
                          sender, subject, problem)
-            errors.append(f"Parse empty: {sender} — {subject} ({problem})")
-            store_results.append((store_code or subject, parsed.get("report_date", ""), "", 0, "NO DATA"))
+            errors.append(f"Rejected: {sender} — {subject} ({problem})")
+            txn_count = len(parsed.get("transactions") or [])
+            store_results.append((store_code or subject, parsed.get("report_date", ""), "", txn_count,
+                                  "REJECTED" if txn_count else "NO DATA"))
             failed_count += 1
             continue
 

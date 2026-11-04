@@ -86,7 +86,7 @@ RetailPrice, SoldPrice, and Payment Amount all use Amount (Inc Tax). TaxAmount u
 ### Error Handling
 
 - Parse failure → email stays unread, counted as failed
-- Parse with no report date / no transactions (e.g. BankingTransactionReport.pdf not attached), or a report date outside 0–14 days before the send date (day/month swap) → email stays unprocessed, counted as failed
+- Parse with no report date / no transactions (e.g. BankingTransactionReport.pdf not attached), or a report date outside 0–60 days before the send date (stores do re-send reports a month late) → email stays unprocessed, counted as failed
 - Report date: the model returns the Period verbatim (`report_period`, e.g. "3/10/2026 to 3/10/2026"); `claude_parser.parse_report_period` converts it as Australian D/M/YYYY. Never let the model convert dates
 - Dedup runs after parsing, keyed on (store, report_date) — never on send date, so a late report sent alongside today's is kept
 - JSON write failure → email stays unread, counted as failed
